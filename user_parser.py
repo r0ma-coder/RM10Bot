@@ -3,7 +3,6 @@ import logging
 import time
 import os
 from telethon import TelegramClient, errors
-from telethon.tl.functions.messages import GetHistoryRequest
 from database import db
 
 # Настройка логирования
@@ -18,9 +17,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация (ЗАМЕНИТЕ НА СВОИ ДАННЫЕ!)
-API_ID = 12345678
-API_HASH = 'a1b2c3d4e5f67890'
-PHONE_NUMBER = '+79991234567'
+API_ID = 37780238 # Ваш api_id с my.telegram.org
+API_HASH = 'fbfe8a419fea2f1ee79b9cc32bc49e18' # Ваш api_hash
+PHONE_NUMBER = '+959760950133'  # Номер аккаунта для парсера
 
 class ParserWorker:
     def __init__(self):
@@ -57,23 +56,27 @@ class ParserWorker:
             logger.error(f"❌ Ошибка инициализации клиента: {e}")
             return False
     
-    async def get_active_users_fast(self, chat, max_users=300, min_messages=2):
+    async def get_active_users_from_history(self, chat_link, max_users=300, min_messages=2):
         """
-        Оптимизированный метод получения активных пользователей
+        Анализирует историю сообщений публичного чата/канала.
+        Работает БЕЗ вступления в чат!
         """
         active_users = {}
         total_messages_checked = 0
         
         try:
-            # Получаем последние сообщения из чата (до 1000)
-            logger.info(f"📊 Анализирую историю сообщений чата...")
+            # Получаем сущность чата по ссылке (работает для публичных чатов)
+            chat = await self.client.get_entity(chat_link)
+            chat_title = chat.title if hasattr(chat, 'title') else chat.username
+            logger.info(f"📊 Начинаю анализ публичного чата: {chat_title}")
             
             offset_id = 0
             batch_count = 0
             
-            while total_messages_checked < 1000 and len(active_users) < max_users:
+            # Анализируем историю сообщений (до 2000 сообщений)
+            while total_messages_checked < 2000 and len(active_users) < max_users:
                 try:
-                    # Получаем пачку сообщений (100 за раз)
+                    # Получаем пачку сообщений из публичного чата
                     messages = await self.client.get_messages(
                         chat, 
                         limit=100,
@@ -81,19 +84,19 @@ class ParserWorker:
                     )
                     
                     if not messages:
+                        logger.info("📭 Больше сообщений нет")
                         break
                     
                     batch_count += 1
                     total_messages_checked += len(messages)
                     
-                    # Обрабатываем сообщения в этой пачке
+                    # Анализируем отправителей сообщений
                     for msg in messages:
+                        # Проверяем, есть ли отправитель у сообщения
                         if hasattr(msg, 'sender_id') and msg.sender_id:
-                            sender_id = msg.sender_id
-                            
-                            # Получаем информацию об отправителе
                             try:
-                                sender = await self.client.get_entity(sender_id)
+                                # Получаем информацию об отправителе
+                                sender = await self.client.get_entity(msg.sender_id)
                                 
                                 # Проверяем, есть ли username
                                 if hasattr(sender, 'username') and sender.username:
@@ -109,23 +112,23 @@ class ParserWorker:
                                         }
                                     else:
                                         active_users[user_key]['messages_count'] += 1
-                                        
-                                    # Если пользователь достиг порога активности, помечаем
+                                    
+                                    # Помечаем как активного при достижении порога
                                     if active_users[user_key]['messages_count'] >= min_messages:
                                         active_users[user_key]['is_active'] = True
                             except Exception as e:
-                                logger.debug(f"Не удалось получить отправителя {sender_id}: {e}")
+                                logger.debug(f"Не удалось получить отправителя: {e}")
                                 continue
                     
                     # Обновляем offset_id для следующей пачки
                     offset_id = messages[-1].id
                     
-                    logger.info(f"Обработано сообщений: {total_messages_checked}, "
+                    logger.info(f"📈 Обработано сообщений: {total_messages_checked}, "
                                f"Найдено уникальных пользователей: {len(active_users)}")
                     
                     # Пауза между пачками для избежания FloodWait
-                    if batch_count % 5 == 0:
-                        await asyncio.sleep(2)
+                    if batch_count % 3 == 0:
+                        await asyncio.sleep(1)
                         
                 except errors.FloodWaitError as e:
                     logger.warning(f"⏳ FloodWait! Ждем {e.seconds} секунд...")
@@ -142,10 +145,11 @@ class ParserWorker:
                     result.append(user_data)
                     
             logger.info(f"✅ Найдено активных пользователей (2+ сообщений): {len(result)}")
+            logger.info(f"📋 Проанализировано сообщений: {total_messages_checked}")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в get_active_users_fast: {e}")
+            logger.error(f"❌ Ошибка при анализе чата: {e}")
             return []
     
     async def process_task(self, task):
@@ -157,13 +161,14 @@ class ParserWorker:
         logger.info(f"🔄 Начинаю обработку задачи #{task_id}: {chat_link}")
         
         try:
-            # Получаем сущность чата
+            # Используем метод анализа истории сообщений
+            active_users = await self.get_active_users_from_history(
+                chat_link, max_users, min_messages=2
+            )
+            
+            # Получаем название чата для имени файла
             chat = await self.client.get_entity(chat_link)
             chat_title = chat.title if hasattr(chat, 'title') else chat.username
-            logger.info(f"📁 Чат: {chat_title}")
-            
-            # Используем оптимизированный метод
-            active_users = await self.get_active_users_fast(chat, max_users, min_messages=2)
             
             # Сохраняем результаты в файл
             filename = await self.save_results(active_users, chat_title)
@@ -178,6 +183,11 @@ class ParserWorker:
                 }
             else:
                 logger.warning(f"⚠️ Задача #{task_id}: активные пользователи не найдены")
+                logger.info("ℹ️ Возможные причины:")
+                logger.info("  - Чат приватный (нужно быть участником)")
+                logger.info("  - В истории нет сообщений от пользователей с username")
+                logger.info("  - В анализируемой истории пользователи написали меньше 2 сообщений")
+                
                 return {
                     'success': True,
                     'filename': None,
@@ -192,6 +202,18 @@ class ParserWorker:
                 'success': False,
                 'error': f'FloodWait: {e.seconds} секунд',
                 'retry_after': e.seconds
+            }
+        except errors.UsernameNotOccupiedError:
+            logger.error(f"❌ Чат/канал не найден: {chat_link}")
+            return {
+                'success': False,
+                'error': 'Чат/канал не существует или ссылка неверна'
+            }
+        except errors.ChannelPrivateError:
+            logger.error(f"❌ Чат приватный: {chat_link}")
+            return {
+                'success': False,
+                'error': 'Чат приватный. Требуется быть участником'
             }
         except Exception as e:
             logger.error(f"❌ Ошибка при обработке задачи #{task_id}: {e}")

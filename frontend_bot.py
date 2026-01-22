@@ -22,23 +22,53 @@ class ParserStates(StatesGroup):
 
 # --- Обработчики команд ---
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
+# ... предыдущий код без изменений ...
+
+@dp.message(Command("tasks"))
+async def cmd_tasks(message: types.Message):
+    """Показывает последние задачи пользователя"""
+    user_tasks = db.get_user_tasks(message.from_user.id, limit=10)
     
-    welcome_text = (
-        "<b>👋 Привет! Я бот для парсинга активных участников чатов!</b>\n\n"
-        "<b>📎 Отправь мне ссылку на публичный чат или канал:</b>\n"
-        "• <code>https://t.me/chat_username</code>\n"
-        "• <code>@chat_username</code>\n\n"
-        "<b>📋 Команды:</b>\n"
-        "/tasks - Посмотреть ваши задачи\n"
-        "/help - Помощь\n"
-        "/cancel - Отменить текущее действие"
-    )
+    if not user_tasks:
+        await message.answer("📭 <b>У вас пока нет задач.</b>\n\nИспользуйте /start чтобы создать первую задачу.")
+        return
     
-    await message.answer(welcome_text, reply_markup=ReplyKeyboardRemove())
-    await state.set_state(ParserStates.waiting_for_link)
+    tasks_text = "<b>📋 Ваши последние задачи:</b>\n\n"
+    
+    for task in user_tasks:
+        # Иконки статусов
+        status_icons = {
+            'pending': '⏳ Ожидает',
+            'processing': '🔄 В процессе',
+            'completed': '✅ Завершена',
+            'failed': '❌ Ошибка'
+        }
+        
+        status_display = status_icons.get(task['status'], f"📌 {task['status']}")
+        
+        # Форматируем время
+        created_time = task['created_at'][:19] if task['created_at'] else 'N/A'
+        
+        tasks_text += f"<b>Задача #{task['id']}</b>\n"
+        tasks_text += f"📎 Ссылка: <code>{task['chat_link'][:30]}...</code>\n"
+        tasks_text += f"🔢 Лимит: <b>{task['limit_count']}</b>\n"
+        tasks_text += f"📊 Статус: {status_display}\n"
+        
+        if task['status'] == 'completed' and task['users_found'] > 0:
+            tasks_text += f"👥 Найдено: <b>{task['users_found']}</b> пользователей\n"
+            if task['result_filename']:
+                tasks_text += f"💾 Файл: <code>{task['result_filename']}</code>\n"
+        elif task['status'] == 'failed' and task['error_message']:
+            tasks_text += f"⚠️ Ошибка: <i>{task['error_message']}</i>\n"
+        
+        tasks_text += f"🕐 Создана: <i>{created_time}</i>\n"
+        tasks_text += "─" * 30 + "\n"
+    
+    tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
+    
+    await message.answer(tasks_text)
+
+# ... остальной код без изменений ...
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
