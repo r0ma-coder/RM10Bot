@@ -100,10 +100,6 @@ async def cmd_tasks(message: types.Message):
     
     tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
     
-    # Создаем клавиатуру с кнопкой отмены
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑️ Отменить задачу", callback_data="cancel_task_menu")]
-    ])
     
     await message.answer(tasks_text, reply_markup=keyboard)
 
@@ -226,11 +222,6 @@ async def cancel_task_menu(callback: types.CallbackQuery):
     """Показывает меню выбора задачи для отмены"""
     user_tasks = db.get_user_tasks(callback.from_user.id, limit=10)
     
-    # Фильтруем задачи, которые можно отменить (только pending и processing)
-    cancellable_tasks = [t for t in user_tasks if t['status'] in ['pending', 'processing']]
-    
-    if not cancellable_tasks:
-        await callback.answer("❌ Нет задач, которые можно отменить", show_alert=True)
         return
     
     # Создаем клавиатуру с кнопками для каждой задачи
@@ -258,8 +249,7 @@ async def cancel_task_menu(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🗑️ <b>Выберите задачу для отмены:</b>\n\n"
         "• ⏳ - Ожидает обработки\n"
-        "• 🔄 - В процессе обработки\n\n"
-        "<i>Отменить можно только задачи в статусе 'ожидает' или 'в процессе'.</i>",
+        "• 🔄 - В процессе обработки\n\n",
         reply_markup=keyboard
     )
     await callback.answer()
@@ -279,29 +269,7 @@ async def cancel_task_confirm(callback: types.CallbackQuery):
     if not task_info:
         await callback.answer("Задача не найдена или у вас нет доступа", show_alert=True)
         return
-    
-    # Проверяем, можно ли отменить задачу
-    if task_info['status'] not in ['pending', 'processing']:
-        await callback.answer(f"Невозможно отменить задачу в статусе '{task_info['status']}'", show_alert=True)
-        return
-    
-    # Создаем клавиатуру для подтверждения
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да, отменить", callback_data=f"confirm_cancel_{task_id}"),
-            InlineKeyboardButton(text="❌ Нет, вернуться", callback_data="back_to_tasks")
-        ]
-    ])
-    
-    # Редактируем сообщение с подтверждением
-    await callback.message.edit_text(
-        f"⚠️ <b>Вы уверены, что хотите отменить задачу #{task_id}?</b>\n\n"
-        f"📎 Ссылка: <code>{task_info['chat_link'][:30]}...</code>\n"
-        f"📊 Статус: <b>{task_info['status']}</b>\n"
-        f"🔢 Лимит: <b>{task_info['limit_count']}</b>\n\n"
-        "<i>Это действие нельзя будет отменить.</i>",
-        reply_markup=keyboard
-    )
+
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("confirm_cancel_"))
@@ -367,10 +335,7 @@ async def back_to_tasks(callback: types.CallbackQuery):
         tasks_text += "─" * 30 + "\n"
     
     tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑️ Отменить задачу", callback_data="cancel_task_menu")]
-    ])
+   
     
     await callback.message.edit_text(tasks_text, reply_markup=keyboard)
     await callback.answer()
