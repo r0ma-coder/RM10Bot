@@ -23,23 +23,55 @@ class ParserStates(StatesGroup):
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 
 # Команда /start
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
+# В команде /tasks добавьте более подробные сообщения:
+
+@dp.message(Command("tasks"))
+async def cmd_tasks(message: types.Message):
+    user_tasks = db.get_user_tasks(message.from_user.id, limit=10)
     
-    welcome_text = (
-        "<b>👋 Привет! Я бот для парсинга активных участников чатов!</b>\n\n"
-        "<b>📎 Отправь мне ссылку на публичный чат или канал:</b>\n"
-        "• <code>https://t.me/chat_username</code>\n"
-        "• <code>@chat_username</code>\n\n"
-        "<b>📋 Команды:</b>\n"
-        "/tasks - Посмотреть ваши задачи\n"
-        "/help - Помощь\n"
-        "/cancel - Отменить текущее действие"
-    )
+    if not user_tasks:
+        await message.answer("📭 <b>У вас пока нет задач.</b>\n\nИспользуйте /start чтобы создать первую задачу.")
+        return
     
-    await message.answer(welcome_text, reply_markup=ReplyKeyboardRemove())
-    await state.set_state(ParserStates.waiting_for_link)
+    tasks_text = "<b>📋 Ваши последние задачи:</b>\n\n"
+    
+    for task in user_tasks:
+        status_icons = {
+            'pending': '⏳',
+            'processing': '🔄',
+            'completed': '✅',
+            'failed': '❌'
+        }
+        
+        icon = status_icons.get(task['status'], '📌')
+        created_time = task['created_at'][:19] if task['created_at'] else 'N/A'
+        
+        tasks_text += f"{icon} <b>Задача #{task['id']}</b>\n"
+        tasks_text += f"📎 Ссылка: <code>{task['chat_link'][:30]}...</code>\n"
+        tasks_text += f"🔢 Лимит: <b>{task['limit_count']}</b>\n"
+        tasks_text += f"📊 Статус: <b>{task['status']}</b>\n"
+        
+        if task['status'] == 'completed':
+            if task['users_found'] > 0:
+                tasks_text += f"👥 Найдено: <b>{task['users_found']}</b> пользователей\n"
+                if task['result_filename']:
+                    tasks_text += f"💾 Файл: <code>{task['result_filename']}</code>\n"
+            else:
+                tasks_text += f"👥 Найдено: <b>0</b> пользователей\n"
+                tasks_text += f"<i>Возможные причины:</i>\n"
+                tasks_text += f"• Пользователи без username\n"
+                tasks_text += f"• Мало сообщений (<2)\n"
+                tasks_text += f"• Нет доступа к чату\n"
+        elif task['status'] == 'failed' and task['error_message']:
+            tasks_text += f"⚠️ Ошибка: <i>{task['error_message']}</i>\n"
+        
+        tasks_text += f"🕐 Создана: <i>{created_time}</i>\n"
+        tasks_text += "─" * 30 + "\n"
+    
+    tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
+    tasks_text += f"\n\n<i>Примечание: Для парсинга бот автоматически вступает в чат.</i>"
+    
+    await message.answer(tasks_text)
 
 # Команда /help
 @dp.message(Command("help"))

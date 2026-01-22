@@ -3,6 +3,9 @@ import logging
 import time
 import os
 from telethon import TelegramClient, errors
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.types import Channel, ChatInviteExported
 from database import db
 
 # Настройка логирования
@@ -16,7 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация (ЗАМЕНИТЕ НА СВОИ ДАННЫЕ!)
 API_ID = 37780238 # Ваш api_id с my.telegram.org
 API_HASH = 'fbfe8a419fea2f1ee79b9cc32bc49e18' # Ваш api_hash
 PHONE_NUMBER = '+959760950133'  # Номер аккаунта для парсера
@@ -28,15 +30,10 @@ class ParserWorker:
         self.session_file = 'parser_session.session'
     
     async def initialize_client(self):
-        """Инициализация клиента Telegram с обработкой ошибок"""
+        """Инициализация клиента Telegram"""
         try:
             self.client = TelegramClient(self.session_file, API_ID, API_HASH)
-            
-            # Настройка автоматической обработки FloodWait
-            self.client.flood_sleep_threshold = 60  # Секунд
-            
             await self.client.connect()
-            logger.info("Подключение к Telegram установлено")
             
             if not await self.client.is_user_authorized():
                 logger.info("Сессия не авторизована. Запрашиваю код...")
@@ -56,100 +53,121 @@ class ParserWorker:
             logger.error(f"❌ Ошибка инициализации клиента: {e}")
             return False
     
-    async def get_active_users_from_history(self, chat_link, max_users=300, min_messages=2):
-        """
-        Анализирует историю сообщений публичного чата/канала.
-        Работает БЕЗ вступления в чат!
-        """
-        active_users = {}
-        total_messages_checked = 0
-        
+    async def join_chat(self, chat_link):
+        """Автоматическое вступление в чат/канал"""
         try:
-            # Получаем сущность чата по ссылке (работает для публичных чатов)
+            # Получаем сущность чата по ссылке
             chat = await self.client.get_entity(chat_link)
             chat_title = chat.title if hasattr(chat, 'title') else chat.username
-            logger.info(f"📊 Начинаю анализ публичного чата: {chat_title}")
             
-            offset_id = 0
-            batch_count = 0
+            # Проверяем, является ли пользователь уже участником
+            try:
+                # Для каналов и супергрупп
+                if isinstance(chat, Channel):
+                    # Пытаемся получить информацию о канале
+                    full_chat = await self.client(GetFullChannelRequest(channel=chat))
+                    # Если мы участник, вернется информация
+                    logger.info(f"✅ Уже состою в канале: {chat_title}")
+                    return chat
+            except errors.ChannelPrivateError:
+                # Не участник канала - нужно вступить
+                pass
             
-            # Анализируем историю сообщений (до 2000 сообщений)
-            while total_messages_checked < 2000 and len(active_users) < max_users:
+            logger.info(f"🔄 Пытаюсь вступить в: {chat_title}")
+            
+            # Вступаем в чат/канал
+            if hasattr(chat, 'username'):
+                # Публичный чат/канал по username
+                await self.client(JoinChannelRequest(channel=chat))
+                logger.info(f"✅ Успешно вступил в публичный чат: {chat_title}")
+            elif hasattr(chat, 'megagroup') and chat.megagroup:
+                # Супергруппа
+                await self.client(JoinChannelRequest(channel=chat))
+                logger.info(f"✅ Успешно вступил в супергруппу: {chat_title}")
+            else:
+                # Обычный чат (может потребоваться инвайт-ссылка)
                 try:
-                    # Получаем пачку сообщений из публичного чата
+                    await self.client(JoinChannelRequest(channel=chat))
+                    logger.info(f"✅ Успешно вступил в чат: {chat_title}")
+                except errors.InviteHashEmptyError:
+                    logger.error(f"❌ Для чата {chat_title} требуется инвайт-ссылка")
+                    raise
+                except errors.InviteHashExpiredError:
+                    logger.error(f"❌ Инвайт-ссылка устарела для {chat_title}")
+                    raise
+                except errors.InviteHashInvalidError:
+                    logger.error(f"❌ Неверная инвайт-ссылка для {chat_title}")
+                    raise
+            
+            # Даем Telegram время обработать вступление
+            await asyncio.sleep(2)
+            return chat
+            
+        except errors.FloodWaitError as e:
+            logger.warning(f"⏳ FloodWait при вступлении! Ждем {e.seconds} секунд...")
+            await asyncio.sleep(e.seconds)
+            return await self.join_chat(chat_link)
+        except Exception as e:
+            logger.error(f"❌ Ошибка при вступлении в чат: {e}")
+            raise
+    
+    async def get_active_users(self, chat, max_users=300, min_messages=2):
+        """Получает активных пользователей из чата"""
+        active_users = []
+        
+        try:
+            # Получаем всех участников чата
+            logger.info(f"👥 Получаю список участников...")
+            all_participants = await self.client.get_participants(chat)
+            logger.info(f"📊 Всего участников: {len(all_participants)}")
+            
+            if len(all_participants) == 0:
+                logger.warning("⚠️ В чате нет участников или нет доступа к списку")
+                return []
+            
+            # Фильтруем пользователей с username и проверяем активность
+            for i, user in enumerate(all_participants):
+                if len(active_users) >= max_users:
+                    break
+                
+                if not user.username:
+                    continue
+                
+                try:
+                    # Проверяем историю сообщений пользователя
                     messages = await self.client.get_messages(
                         chat, 
-                        limit=100,
-                        offset_id=offset_id
+                        limit=50,  # Проверяем последние 50 сообщений
+                        from_user=user
                     )
                     
-                    if not messages:
-                        logger.info("📭 Больше сообщений нет")
-                        break
+                    user_msg_count = len(messages)
                     
-                    batch_count += 1
-                    total_messages_checked += len(messages)
+                    if user_msg_count >= min_messages:
+                        user_info = {
+                            'id': user.id,
+                            'username': user.username,
+                            'first_name': user.first_name,
+                            'last_name': user.last_name,
+                            'messages_count': user_msg_count
+                        }
+                        active_users.append(user_info)
+                        
+                        logger.info(f"✅ Активный: @{user.username} (сообщений: {user_msg_count})")
                     
-                    # Анализируем отправителей сообщений
-                    for msg in messages:
-                        # Проверяем, есть ли отправитель у сообщения
-                        if hasattr(msg, 'sender_id') and msg.sender_id:
-                            try:
-                                # Получаем информацию об отправителе
-                                sender = await self.client.get_entity(msg.sender_id)
-                                
-                                # Проверяем, есть ли username
-                                if hasattr(sender, 'username') and sender.username:
-                                    user_key = sender.username.lower()
-                                    
-                                    if user_key not in active_users:
-                                        active_users[user_key] = {
-                                            'id': sender.id,
-                                            'username': sender.username,
-                                            'first_name': getattr(sender, 'first_name', ''),
-                                            'last_name': getattr(sender, 'last_name', ''),
-                                            'messages_count': 1
-                                        }
-                                    else:
-                                        active_users[user_key]['messages_count'] += 1
-                                    
-                                    # Помечаем как активного при достижении порога
-                                    if active_users[user_key]['messages_count'] >= min_messages:
-                                        active_users[user_key]['is_active'] = True
-                            except Exception as e:
-                                logger.debug(f"Не удалось получить отправителя: {e}")
-                                continue
-                    
-                    # Обновляем offset_id для следующей пачки
-                    offset_id = messages[-1].id
-                    
-                    logger.info(f"📈 Обработано сообщений: {total_messages_checked}, "
-                               f"Найдено уникальных пользователей: {len(active_users)}")
-                    
-                    # Пауза между пачками для избежания FloodWait
-                    if batch_count % 3 == 0:
+                    # Пауза между запросами, чтобы избежать блокировки
+                    if i % 5 == 0:
                         await asyncio.sleep(1)
                         
-                except errors.FloodWaitError as e:
-                    logger.warning(f"⏳ FloodWait! Ждем {e.seconds} секунд...")
-                    await asyncio.sleep(e.seconds)
-                    continue
                 except Exception as e:
-                    logger.error(f"Ошибка при получении сообщений: {e}")
-                    break
+                    logger.debug(f"⚠️ Ошибка при проверке пользователя {user.username}: {e}")
+                    continue
             
-            # Фильтруем только активных пользователей (2+ сообщений)
-            result = []
-            for user_data in active_users.values():
-                if user_data.get('is_active', False):
-                    result.append(user_data)
-                    
-            logger.info(f"✅ Найдено активных пользователей (2+ сообщений): {len(result)}")
-            logger.info(f"📋 Проанализировано сообщений: {total_messages_checked}")
-            return result
+            logger.info(f"🎯 Найдено активных пользователей: {len(active_users)}")
+            return active_users
             
         except Exception as e:
-            logger.error(f"❌ Ошибка при анализе чата: {e}")
+            logger.error(f"❌ Ошибка при получении пользователей: {e}")
             return []
     
     async def process_task(self, task):
@@ -161,20 +179,18 @@ class ParserWorker:
         logger.info(f"🔄 Начинаю обработку задачи #{task_id}: {chat_link}")
         
         try:
-            # Используем метод анализа истории сообщений
-            active_users = await self.get_active_users_from_history(
-                chat_link, max_users, min_messages=2
-            )
-            
-            # Получаем название чата для имени файла
-            chat = await self.client.get_entity(chat_link)
+            # Шаг 1: Вступаем в чат
+            chat = await self.join_chat(chat_link)
             chat_title = chat.title if hasattr(chat, 'title') else chat.username
             
-            # Сохраняем результаты в файл
+            # Шаг 2: Получаем активных пользователей
+            active_users = await self.get_active_users(chat, max_users, min_messages=2)
+            
+            # Шаг 3: Сохраняем результаты
             filename = await self.save_results(active_users, chat_title)
             
             if active_users:
-                logger.info(f"✅ Задача #{task_id} завершена. Найдено активных: {len(active_users)}")
+                logger.info(f"✅ Задача #{task_id} завершена. Найдено: {len(active_users)}")
                 return {
                     'success': True,
                     'filename': filename,
@@ -183,37 +199,37 @@ class ParserWorker:
                 }
             else:
                 logger.warning(f"⚠️ Задача #{task_id}: активные пользователи не найдены")
-                logger.info("ℹ️ Возможные причины:")
-                logger.info("  - Чат приватный (нужно быть участником)")
-                logger.info("  - В истории нет сообщений от пользователей с username")
-                logger.info("  - В анализируемой истории пользователи написали меньше 2 сообщений")
-                
                 return {
                     'success': True,
                     'filename': None,
                     'users_found': 0,
-                    'chat_title': chat_title,
-                    'note': 'Активные пользователи не найдены'
+                    'chat_title': chat_title
                 }
                 
-        except errors.FloodWaitError as e:
-            logger.error(f"⏳ FloodWaitError для задачи #{task_id}: {e.seconds} секунд")
-            return {
-                'success': False,
-                'error': f'FloodWait: {e.seconds} секунд',
-                'retry_after': e.seconds
-            }
-        except errors.UsernameNotOccupiedError:
-            logger.error(f"❌ Чат/канал не найден: {chat_link}")
-            return {
-                'success': False,
-                'error': 'Чат/канал не существует или ссылка неверна'
-            }
         except errors.ChannelPrivateError:
             logger.error(f"❌ Чат приватный: {chat_link}")
             return {
                 'success': False,
-                'error': 'Чат приватный. Требуется быть участником'
+                'error': 'Чат приватный. Требуется приглашение.'
+            }
+        except errors.InviteHashEmptyError:
+            logger.error(f"❌ Требуется инвайт-ссылка: {chat_link}")
+            return {
+                'success': False,
+                'error': 'Для вступления требуется инвайт-ссылка.'
+            }
+        except errors.UsernameNotOccupiedError:
+            logger.error(f"❌ Чат не существует: {chat_link}")
+            return {
+                'success': False,
+                'error': 'Чат/канал не существует.'
+            }
+        except errors.FloodWaitError as e:
+            logger.error(f"⏳ FloodWait: {e.seconds} секунд")
+            return {
+                'success': False,
+                'error': f'FloodWait: {e.seconds} секунд',
+                'retry_after': e.seconds
             }
         except Exception as e:
             logger.error(f"❌ Ошибка при обработке задачи #{task_id}: {e}")
@@ -242,7 +258,7 @@ class ParserWorker:
                 f.write(f"Время парсинга: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("=" * 60 + "\n\n")
                 
-                # Сортируем по количеству сообщений (по убыванию)
+                # Сортируем по количеству сообщений
                 users_sorted = sorted(users, key=lambda x: x['messages_count'], reverse=True)
                 
                 for i, user in enumerate(users_sorted, 1):
@@ -264,61 +280,53 @@ class ParserWorker:
         
         while self.is_running:
             try:
-                # Получаем следующую задачу из базы
+                # Получаем следующую задачу
                 task = db.get_pending_task()
                 
                 if task:
                     task_id = task['id']
                     logger.info(f"📋 Найдена задача #{task_id} для обработки")
                     
-                    # Обновляем статус задачи на "обрабатывается"
-                    success = db.update_task_status(task_id, 'processing')
-                    
-                    if not success:
-                        logger.warning(f"⚠️ Не удалось обновить статус задачи #{task_id}")
-                        await asyncio.sleep(1)
-                        continue
+                    # Обновляем статус задачи
+                    db.update_task_status(task_id, 'processing')
                     
                     # Обрабатываем задачу
                     result = await self.process_task(task)
                     
-                    # Обновляем статус задачи в зависимости от результата
+                    # Обновляем статус в зависимости от результата
                     if result['success']:
                         if result.get('users_found', 0) > 0:
-                            success = db.update_task_status(
+                            db.update_task_status(
                                 task_id, 
                                 'completed',
                                 result_filename=result.get('filename'),
                                 users_found=result.get('users_found', 0)
                             )
-                            if success:
-                                logger.info(f"✅ Задача #{task_id} успешно завершена")
+                            logger.info(f"✅ Задача #{task_id} успешно завершена")
                         else:
-                            success = db.update_task_status(
+                            db.update_task_status(
                                 task_id, 
                                 'completed',
                                 result_filename=None,
                                 users_found=0
                             )
-                            if success:
-                                logger.info(f"ℹ️ Задача #{task_id} завершена (нет активных пользователей)")
+                            logger.info(f"ℹ️ Задача #{task_id} завершена (нет активных пользователей)")
                     else:
                         error_msg = result.get('error', 'Unknown error')
-                        success = db.update_task_status(
+                        db.update_task_status(
                             task_id, 
                             'failed',
                             error_message=error_msg[:100]
                         )
-                        if success:
-                            logger.error(f"❌ Задача #{task_id} завершилась с ошибкой: {error_msg}")
+                        logger.error(f"❌ Задача #{task_id} завершилась с ошибкой: {error_msg}")
                         
-                        # Если это FloodWait, делаем паузу
+                        # Если FloodWait, делаем паузу
                         if 'FloodWait' in error_msg:
                             wait_time = result.get('retry_after', 60)
                             logger.warning(f"⏳ Пауза {wait_time} секунд из-за FloodWait...")
                             await asyncio.sleep(wait_time)
                 else:
-                    # Нет задач - ждём 5 секунд
+                    # Нет задач - ждём
                     await asyncio.sleep(5)
                     
             except KeyboardInterrupt:
@@ -331,23 +339,23 @@ class ParserWorker:
     
     async def start(self):
         """Запуск работника"""
-        # Инициализируем клиент
         if not await self.initialize_client():
             logger.error("❌ Не удалось инициализировать клиент Telegram")
             return False
         
         logger.info("✅ Парсер готов к работе")
         
-        # Запускаем основной цикл
         try:
             await self.worker_loop()
         finally:
-            # Закрываем соединение при завершении
             if self.client and self.client.is_connected():
                 await self.client.disconnect()
                 logger.info("📴 Соединение с Telegram закрыто")
         
         return True
+
+# Необходимый импорт
+from telethon.tl.functions.channels import GetFullChannelRequest
 
 # --- Запуск парсера ---
 async def main():
