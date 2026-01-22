@@ -18,9 +18,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация (ЗАМЕНИТЕ НА СВОИ ДАННЫЕ!)
-API_ID = 37780238 # Ваш api_id с my.telegram.org
-API_HASH = 'fbfe8a419fea2f1ee79b9cc32bc49e18' # Ваш api_hash
-PHONE_NUMBER = '+959760950133'  # Номер аккаунта для парсера
+API_ID = 12345678
+API_HASH = 'a1b2c3d4e5f67890'
+PHONE_NUMBER = '+79991234567'
 
 class ParserWorker:
     def __init__(self):
@@ -57,15 +57,9 @@ class ParserWorker:
             logger.error(f"❌ Ошибка инициализации клиента: {e}")
             return False
     
-    async def check_task_cancelled(self, task_id):
-        """Проверяет, была ли задача отменена"""
-        task_info = db.get_task_info(task_id)
-        return task_info and task_info['status'] == 'cancelled'
-    
-    async def get_active_users_fast(self, chat, max_users=300, min_messages=2, task_id=None):
+    async def get_active_users_fast(self, chat, max_users=300, min_messages=2):
         """
         Оптимизированный метод получения активных пользователей
-        с проверкой отмены задачи
         """
         active_users = {}
         total_messages_checked = 0
@@ -78,11 +72,6 @@ class ParserWorker:
             batch_count = 0
             
             while total_messages_checked < 1000 and len(active_users) < max_users:
-                # Проверяем, не была ли отменена задача
-                if task_id and await self.check_task_cancelled(task_id):
-                    logger.info(f"⏹️ Задача #{task_id} отменена, прекращаю парсинг")
-                    return []
-                
                 try:
                     # Получаем пачку сообщений (100 за раз)
                     messages = await self.client.get_messages(
@@ -160,7 +149,7 @@ class ParserWorker:
             return []
     
     async def process_task(self, task):
-        """Обработка одной задачи парсинга с проверкой отмены"""
+        """Обработка одной задачи парсинга"""
         task_id = task['id']
         chat_link = task['chat_link']
         max_users = task['limit_count']
@@ -168,33 +157,13 @@ class ParserWorker:
         logger.info(f"🔄 Начинаю обработку задачи #{task_id}: {chat_link}")
         
         try:
-            # Проверяем, не была ли задача отменена перед началом
-            if await self.check_task_cancelled(task_id):
-                logger.info(f"⏹️ Задача #{task_id} была отменена до начала обработки")
-                return {
-                    'success': False,
-                    'error': 'Задача отменена',
-                    'cancelled': True
-                }
-            
             # Получаем сущность чата
             chat = await self.client.get_entity(chat_link)
             chat_title = chat.title if hasattr(chat, 'title') else chat.username
             logger.info(f"📁 Чат: {chat_title}")
             
             # Используем оптимизированный метод
-            active_users = await self.get_active_users_fast(
-                chat, max_users, min_messages=2, task_id=task_id
-            )
-            
-            # Проверяем, не была ли задача отменена во время парсинга
-            if await self.check_task_cancelled(task_id):
-                logger.info(f"⏹️ Задача #{task_id} была отменена во время парсинга")
-                return {
-                    'success': False,
-                    'error': 'Задача отменена',
-                    'cancelled': True
-                }
+            active_users = await self.get_active_users_fast(chat, max_users, min_messages=2)
             
             # Сохраняем результаты в файл
             filename = await self.save_results(active_users, chat_title)
@@ -268,7 +237,7 @@ class ParserWorker:
             return None
     
     async def worker_loop(self):
-        """Основной цикл работника с улучшенной обработкой отмены задач"""
+        """Основной цикл работника"""
         logger.info("🚀 Парсер запущен и ожидает задачи...")
         
         while self.is_running:
@@ -284,17 +253,12 @@ class ParserWorker:
                     success = db.update_task_status(task_id, 'processing')
                     
                     if not success:
-                        logger.warning(f"⚠️ Не удалось обновить статус задачи #{task_id} (возможно, отменена)")
+                        logger.warning(f"⚠️ Не удалось обновить статус задачи #{task_id}")
                         await asyncio.sleep(1)
                         continue
                     
                     # Обрабатываем задачу
                     result = await self.process_task(task)
-                    
-                    # Проверяем, была ли задача отменена
-                    if result.get('cancelled', False):
-                        logger.info(f"⏹️ Задача #{task_id} была отменена, пропускаем обновление статуса")
-                        continue
                     
                     # Обновляем статус задачи в зависимости от результата
                     if result['success']:
@@ -307,8 +271,6 @@ class ParserWorker:
                             )
                             if success:
                                 logger.info(f"✅ Задача #{task_id} успешно завершена")
-                            else:
-                                logger.warning(f"⚠️ Задача #{task_id} завершена, но статус не обновлен (возможно, отменена)")
                         else:
                             success = db.update_task_status(
                                 task_id, 
@@ -320,15 +282,13 @@ class ParserWorker:
                                 logger.info(f"ℹ️ Задача #{task_id} завершена (нет активных пользователей)")
                     else:
                         error_msg = result.get('error', 'Unknown error')
-                        # Не обновляем статус для отмененных задач
-                        if 'отменена' not in error_msg.lower():
-                            success = db.update_task_status(
-                                task_id, 
-                                'failed',
-                                error_message=error_msg[:100]  # Ограничиваем длину ошибки
-                            )
-                            if success:
-                                logger.error(f"❌ Задача #{task_id} завершилась с ошибкой: {error_msg}")
+                        success = db.update_task_status(
+                            task_id, 
+                            'failed',
+                            error_message=error_msg[:100]
+                        )
+                        if success:
+                            logger.error(f"❌ Задача #{task_id} завершилась с ошибкой: {error_msg}")
                         
                         # Если это FloodWait, делаем паузу
                         if 'FloodWait' in error_msg:
@@ -345,7 +305,7 @@ class ParserWorker:
                 
             except Exception as e:
                 logger.error(f"❌ Критическая ошибка в основном цикле: {e}")
-                await asyncio.sleep(30)  # Большая пауза при критической ошибке
+                await asyncio.sleep(30)
     
     async def start(self):
         """Запуск работника"""

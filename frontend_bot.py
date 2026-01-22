@@ -1,11 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardRemove
 from aiogram.enums import ParseMode
 from database import db
 
@@ -61,7 +60,7 @@ async def cmd_help(message: types.Message):
 
 @dp.message(Command("tasks"))
 async def cmd_tasks(message: types.Message):
-    """Показывает последние задачи пользователя с кнопкой отмены"""
+    """Показывает последние задачи пользователя"""
     user_tasks = db.get_user_tasks(message.from_user.id, limit=10)
     
     if not user_tasks:
@@ -76,8 +75,7 @@ async def cmd_tasks(message: types.Message):
             'pending': '⏳',
             'processing': '🔄',
             'completed': '✅',
-            'failed': '❌',
-            'cancelled': '🚫'
+            'failed': '❌'
         }
         
         icon = status_icons.get(task['status'], '📌')
@@ -100,8 +98,7 @@ async def cmd_tasks(message: types.Message):
     
     tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
     
-    
-    await message.answer(tasks_text, reply_markup=keyboard)
+    await message.answer(tasks_text)
 
 @dp.message(ParserStates.waiting_for_link)
 async def process_link(message: types.Message, state: FSMContext):
@@ -214,131 +211,6 @@ async def handle_other_messages(message: types.Message):
         "Используйте /start чтобы начать создание задачи парсинга.\n"
         "Или /help для получения справки."
     )
-
-# --- Обработчики инлайн-кнопок ---
-
-@dp.callback_query(F.data == "cancel_task_menu")
-async def cancel_task_menu(callback: types.CallbackQuery):
-    """Показывает меню выбора задачи для отмены"""
-    user_tasks = db.get_user_tasks(callback.from_user.id, limit=10)
-    
-        return
-    
-    # Создаем клавиатуру с кнопками для каждой задачи
-    keyboard_buttons = []
-    
-    for task in cancellable_tasks[:10]:  # Максимум 10 задач
-        status_icon = '⏳' if task['status'] == 'pending' else '🔄'
-        task_text = f"{status_icon} Задача #{task['id']}"
-        
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=task_text,
-                callback_data=f"cancel_task_{task['id']}"
-            )
-        ])
-    
-    # Добавляем кнопку "Назад"
-    keyboard_buttons.append([
-        InlineKeyboardButton(text="↩️ Назад к списку", callback_data="back_to_tasks")
-    ])
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    
-    # Редактируем сообщение с новым текстом и клавиатурой
-    await callback.message.edit_text(
-        "🗑️ <b>Выберите задачу для отмены:</b>\n\n"
-        "• ⏳ - Ожидает обработки\n"
-        "• 🔄 - В процессе обработки\n\n",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("cancel_task_"))
-async def cancel_task_confirm(callback: types.CallbackQuery):
-    """Подтверждение отмены задачи"""
-    task_id = callback.data.split("_")[-1]
-    
-    if not task_id.isdigit():
-        await callback.answer("Неверный ID задачи", show_alert=True)
-        return
-    
-    # Получаем информацию о задаче
-    task_info = db.get_task_info(task_id, callback.from_user.id)
-    
-    if not task_info:
-        await callback.answer("Задача не найдена или у вас нет доступа", show_alert=True)
-        return
-
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("confirm_cancel_"))
-async def cancel_task_execute(callback: types.CallbackQuery):
-    """Выполняет отмену задачи"""
-    task_id = callback.data.split("_")[-1]
-    
-    if not task_id.isdigit():
-        await callback.answer("Неверный ID задачи", show_alert=True)
-        return
-    
-    # Отменяем задачу в базе данных
-    success = db.cancel_task(task_id, callback.from_user.id)
-    
-    if success:
-        await callback.message.edit_text(
-            f"✅ <b>Задача #{task_id} успешно отменена!</b>\n\n"
-            f"Время отмены: <i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>\n\n"
-            "Используйте /tasks для просмотра обновленного списка задач."
-        )
-        
-        # Логируем отмену задачи
-        logging.info(f"User {callback.from_user.id} отменил задачу #{task_id}")
-        await callback.answer(f"Задача #{task_id} отменена")
-    else:
-        await callback.answer("❌ Ошибка при отмене задачи", show_alert=True)
-
-@dp.callback_query(F.data == "back_to_tasks")
-async def back_to_tasks(callback: types.CallbackQuery):
-    """Возвращает к списку задач"""
-    user_tasks = db.get_user_tasks(callback.from_user.id, limit=10)
-    
-    if not user_tasks:
-        await callback.message.edit_text("📭 <b>У вас пока нет задач.</b>\n\nИспользуйте /start чтобы создать первую задачу.")
-        await callback.answer()
-        return
-    
-    tasks_text = "<b>📋 Ваши последние задачи:</b>\n\n"
-    
-    for task in user_tasks:
-        status_icons = {
-            'pending': '⏳',
-            'processing': '🔄',
-            'completed': '✅',
-            'failed': '❌',
-            'cancelled': '🚫'
-        }
-        
-        icon = status_icons.get(task['status'], '📌')
-        created_time = task['created_at'][:19] if task['created_at'] else 'N/A'
-        
-        tasks_text += f"{icon} <b>Задача #{task['id']}</b>\n"
-        tasks_text += f"<code>{task['chat_link'][:30]}</code>\n"
-        tasks_text += f"Лимит: <b>{task['limit_count']}</b>\n"
-        tasks_text += f"Статус: <b>{task['status']}</b>\n"
-        
-        if task['status'] == 'completed' and task['users_found'] > 0:
-            tasks_text += f"Найдено: <b>{task['users_found']}</b> пользователей\n"
-        elif task['status'] == 'failed' and task['error_message']:
-            tasks_text += f"Ошибка: <i>{task['error_message'][:50]}</i>\n"
-        
-        tasks_text += f"Создана: <i>{created_time}</i>\n"
-        tasks_text += "─" * 30 + "\n"
-    
-    tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
-   
-    
-    await callback.message.edit_text(tasks_text, reply_markup=keyboard)
-    await callback.answer()
 
 # --- Запуск бота ---
 async def main():

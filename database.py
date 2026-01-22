@@ -28,7 +28,7 @@ class TaskDatabase:
                 user_id INTEGER NOT NULL,
                 chat_link TEXT NOT NULL,
                 limit_count INTEGER DEFAULT 300,
-                status TEXT DEFAULT 'pending', -- pending, processing, completed, failed, cancelled
+                status TEXT DEFAULT 'pending', -- pending, processing, completed, failed
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at TIMESTAMP NULL,
                 completed_at TIMESTAMP NULL,
@@ -129,7 +129,7 @@ class TaskDatabase:
                     UPDATE parsing_tasks 
                     SET status = ?, 
                         started_at = CURRENT_TIMESTAMP
-                    WHERE id = ? AND status != 'cancelled'
+                    WHERE id = ?
                 ''', (status, task_id))
             elif status == 'completed':
                 # Ограничиваем длину имени файла
@@ -140,7 +140,7 @@ class TaskDatabase:
                         completed_at = CURRENT_TIMESTAMP,
                         result_filename = ?,
                         users_found = ?
-                    WHERE id = ? AND status != 'cancelled'
+                    WHERE id = ?
                 ''', (status, filename_short, users_found, task_id))
             elif status == 'failed':
                 # Ограничиваем длину сообщения об ошибке
@@ -150,15 +150,8 @@ class TaskDatabase:
                     SET status = ?, 
                         completed_at = CURRENT_TIMESTAMP,
                         error_message = ?
-                    WHERE id = ? AND status != 'cancelled'
-                ''', (status, error_short, task_id))
-            elif status == 'cancelled':
-                cursor.execute('''
-                    UPDATE parsing_tasks 
-                    SET status = ?,
-                        completed_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (status, task_id))
+                ''', (status, error_short, task_id))
             else:
                 cursor.execute('''
                     UPDATE parsing_tasks 
@@ -172,56 +165,12 @@ class TaskDatabase:
             if updated:
                 logger.info(f"Задача #{task_id} обновлена: статус={status}")
             else:
-                logger.warning(f"Задача #{task_id} не была обновлена (возможно, отменена)")
+                logger.warning(f"Задача #{task_id} не была обновлена")
             
             return updated
             
         except Exception as e:
             logger.error(f"Ошибка при обновлении задачи #{task_id}: {e}")
-            conn.rollback()
-            return False
-        finally:
-            conn.close()
-    
-    def cancel_task(self, task_id, user_id):
-        """Отмена задачи пользователем"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            # Проверяем, можно ли отменить задачу (только pending или processing)
-            cursor.execute('''
-                SELECT status FROM parsing_tasks 
-                WHERE id = ? AND user_id = ? AND status IN ('pending', 'processing')
-            ''', (task_id, user_id))
-            
-            task = cursor.fetchone()
-            
-            if not task:
-                conn.close()
-                logger.warning(f"Пользователь {user_id} пытался отменить задачу #{task_id}, но она не найдена или недоступна")
-                return False
-            
-            # Обновляем статус на cancelled
-            cursor.execute('''
-                UPDATE parsing_tasks 
-                SET status = 'cancelled',
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND user_id = ?
-            ''', (task_id, user_id))
-            
-            conn.commit()
-            cancelled = cursor.rowcount > 0
-            
-            if cancelled:
-                logger.info(f"Задача #{task_id} отменена пользователем {user_id}")
-            else:
-                logger.warning(f"Не удалось отменить задачу #{task_id}")
-            
-            return cancelled
-            
-        except Exception as e:
-            logger.error(f"Ошибка при отмене задачи #{task_id}: {e}")
             conn.rollback()
             return False
         finally:
