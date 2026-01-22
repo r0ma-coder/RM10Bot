@@ -20,61 +20,28 @@ class ParserStates(StatesGroup):
     waiting_for_link = State()
     waiting_for_limit = State()
 
-# --- Обработчики команд ---
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 
-# ... предыдущий код без изменений ...
-
-@dp.message(Command("tasks"))
-async def cmd_tasks(message: types.Message):
-    """Показывает последние задачи пользователя"""
-    user_tasks = db.get_user_tasks(message.from_user.id, limit=10)
-    
-    if not user_tasks:
-        await message.answer("📭 <b>У вас пока нет задач.</b>\n\nИспользуйте /start чтобы создать первую задачу.")
-        return
-    
-    tasks_text = "<b>📋 Ваши последние задачи:</b>\n\n"
-    
-    for task in user_tasks:
-        # Иконки статусов
-        status_icons = {
-            'pending': '⏳ Ожидает',
-            'processing': '🔄 В процессе',
-            'completed': '✅ Завершена',
-            'failed': '❌ Ошибка'
-        }
-        
-        status_display = status_icons.get(task['status'], f"📌 {task['status']}")
-        
-        # Форматируем время
-        created_time = task['created_at'][:19] if task['created_at'] else 'N/A'
-        
-        tasks_text += f"<b>Задача #{task['id']}</b>\n"
-        tasks_text += f"📎 Ссылка: <code>{task['chat_link'][:30]}...</code>\n"
-        tasks_text += f"🔢 Лимит: <b>{task['limit_count']}</b>\n"
-        tasks_text += f"📊 Статус: {status_display}\n"
-        
-        if task['status'] == 'completed' and task['users_found'] > 0:
-            tasks_text += f"👥 Найдено: <b>{task['users_found']}</b> пользователей\n"
-            if task['result_filename']:
-                tasks_text += f"💾 Файл: <code>{task['result_filename']}</code>\n"
-        elif task['status'] == 'failed' and task['error_message']:
-            tasks_text += f"⚠️ Ошибка: <i>{task['error_message']}</i>\n"
-        
-        tasks_text += f"🕐 Создана: <i>{created_time}</i>\n"
-        tasks_text += "─" * 30 + "\n"
-    
-    tasks_text += f"\n<b>Всего задач:</b> {len(user_tasks)}"
-    
-    await message.answer(tasks_text)
-
-# ... остальной код без изменений ...
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
+# Команда /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Действие отменено. Используйте /start чтобы начать заново.")
+    
+    welcome_text = (
+        "<b>👋 Привет! Я бот для парсинга активных участников чатов!</b>\n\n"
+        "<b>📎 Отправь мне ссылку на публичный чат или канал:</b>\n"
+        "• <code>https://t.me/chat_username</code>\n"
+        "• <code>@chat_username</code>\n\n"
+        "<b>📋 Команды:</b>\n"
+        "/tasks - Посмотреть ваши задачи\n"
+        "/help - Помощь\n"
+        "/cancel - Отменить текущее действие"
+    )
+    
+    await message.answer(welcome_text, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(ParserStates.waiting_for_link)
 
+# Команда /help
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = (
@@ -88,6 +55,7 @@ async def cmd_help(message: types.Message):
     )
     await message.answer(help_text)
 
+# Команда /tasks
 @dp.message(Command("tasks"))
 async def cmd_tasks(message: types.Message):
     """Показывает последние задачи пользователя"""
@@ -130,11 +98,25 @@ async def cmd_tasks(message: types.Message):
     
     await message.answer(tasks_text)
 
+# Команда /cancel
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("❌ Нет активных действий для отмены.")
+        return
+    
+    await state.clear()
+    await message.answer("✅ Текущее действие отменено. Используйте /start чтобы начать заново.")
+
+# ========== ОБРАБОТЧИКИ СОСТОЯНИЙ ==========
+
+# Принятие ссылки
 @dp.message(ParserStates.waiting_for_link)
 async def process_link(message: types.Message, state: FSMContext):
     user_link = message.text.strip()
     
-    # Обработка отмены
+    # Обработка команды /cancel в состоянии
     if user_link.lower() == '/cancel':
         await cmd_cancel(message, state)
         return
@@ -163,11 +145,12 @@ async def process_link(message: types.Message, state: FSMContext):
     await message.answer(limit_text)
     await state.set_state(ParserStates.waiting_for_limit)
 
+# Принятие лимита
 @dp.message(ParserStates.waiting_for_limit)
 async def process_limit(message: types.Message, state: FSMContext):
     user_input = message.text.strip()
     
-    # Обработка отмены
+    # Обработка команды /cancel в состоянии
     if user_input.lower() == '/cancel':
         await cmd_cancel(message, state)
         return
@@ -233,17 +216,22 @@ async def process_limit(message: types.Message, state: FSMContext):
     await message.answer(result_text, reply_markup=ReplyKeyboardRemove())
     await state.clear()
 
+# ========== ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ ==========
+
 @dp.message()
 async def handle_other_messages(message: types.Message):
     """Обработка всех остальных сообщений"""
+    # Если это не команда, просто показываем приветствие
     await message.answer(
         "🤔 <b>Не понял вашу команду.</b>\n\n"
         "Используйте /start чтобы начать создание задачи парсинга.\n"
         "Или /help для получения справки."
     )
 
-# --- Запуск бота ---
+# ========== ЗАПУСК БОТА ==========
+
 async def main():
+    # Настраиваем логирование
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -251,13 +239,21 @@ async def main():
     
     # Проверяем подключение к базе данных
     try:
-        test_tasks = db.get_user_tasks(1, limit=1)
+        # Простой тест подключения
+        conn = db.get_connection()
+        conn.close()
         logging.info("✅ Подключение к базе данных успешно")
     except Exception as e:
         logging.error(f"❌ Ошибка подключения к базе данных: {e}")
         return
     
+    # Запускаем бота
     logging.info("🚀 Бот запускается...")
+    
+    # Сброс обновлений (удаляет старые сообщения в очереди)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем опрос
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
